@@ -1,110 +1,110 @@
-from flask import Flask, render_template, request
-import tensorflow as tf
-from keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from nltk.stem import WordNetLemmatizer
 import re
-import contractions
 import pickle
+import os
+import tensorflow as tf
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import SnowballStemmer
+from flask import Flask, render_template, request
+from tensorflow.keras.models import load_model
 
-nltk.download('stopwords')
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
 nltk.download('punkt')
-nltk.download('wordnet')
+nltk.download('stopwords')
 
 app = Flask(__name__)
 
-# Load the tokenizer and model
-with open('tokenizer.pickle', 'rb') as handle:
-    tokenizer = pickle.load(handle)
-model = load_model('./RNN_MOVIE_REVIEW.h5')
 
-chat_words = {
-    # Your chat words dictionary
-}
+def load_my_model(model_path):
+    try:
+        model = load_model(model_path)
+        print("Model loaded successfully!")
+        return model
+    except OSError as e:
+        print(f"Error loading model: {e}")
+        return None
 
 
-def chat_conversion(text):
-    new_text = []
-    for w in text.split():
-        if w.upper() in chat_words:
-            new_text.append(chat_words[w.upper()])
+def clean(text):
+    cleaned = re.compile(r'<.*?>')
+    return re.sub(cleaned, '', text)
+
+
+def is_special(text):
+    rem = ''
+    for i in text:
+        if i.isalnum():
+            rem = rem + i
         else:
-            new_text.append(w)
-    return " ".join(new_text)
+            rem = rem + ' '
+    return rem
 
 
-def remove_html_tags(text):
-    return re.sub('<.*?>', '', text)
+def to_lower(text):
+    return text.lower()
 
 
-def remove_punctuation(text):
-    return re.sub(r'[^\w\s]', '', text)
-
-
-def stopwords_removal(text):
+def rem_stopwords(text):
     stop_words = set(stopwords.words('english'))
-    word_tokens = word_tokenize(text)
-    filtered_text = [word for word in word_tokens if word not in stop_words]
-    return ' '.join(filtered_text)
+    words = word_tokenize(text)
+    return [w for w in words if w not in stop_words]
 
 
-def remove_emoji(text):
-    return text.encode('ascii', 'ignore').decode('ascii')
+def stem_txt(text):
+    ss = SnowballStemmer('english')
+    return " ".join([ss.stem(w) for w in text])
 
 
-def expand_contractions(text):
-    return contractions.fix(text)
+def clean_text(text):
+    text = clean(text)
+    text = is_special(text)
+    text = to_lower(text)
+    text = rem_stopwords(text)
+    text = stem_txt(text)
+    return text
 
 
-lemmatizer = WordNetLemmatizer()
+model = load_my_model("./model/Movies_Review_Analysis_Model.keras")
+
+if model is None:
+    print("Model failed to load. Exiting.")
+    exit(1)
+
+with open('./model/Movies_Review_Analysis.pkl', 'rb') as tokenizer_file:
+    tokenizer = pickle.load(tokenizer_file)
+
+max_sequence_length = 100
 
 
-def lemmatize_text(text):
-    word_list = word_tokenize(text)
-    lemmatized_output = ' '.join([lemmatizer.lemmatize(w) for w in word_list])
-    return lemmatized_output
-
-
-@app.route('/')
-def index():
+@app.route('/', methods=['GET'])
+def home():
     return render_template('index.html')
 
 
 @app.route('/predict', methods=['POST'])
-def predicate():
-    input_text = request.form['review']
-    print(input_text)
-    # change lower case
-    input_text = input_text.lower()
-    # remove html tags
-    input_text = remove_html_tags(input_text)
-    # remove punctuation
-    input_text = remove_punctuation(input_text)
-    # chat conversion
-    input_text = chat_conversion(input_text)
-    # remove stopwords
-    input_text = stopwords_removal(input_text)
-    # remove emoji
-    input_text = remove_emoji(input_text)
-    # expand contractions
-    input_text = expand_contractions(input_text)
-    # lemmatization
-    input_text = lemmatize_text(input_text)
+def predict():
+    if request.form['user_input'] == '':
+        return "<p id='prediction' class='flex items-center justify-center w-96 p-4 mt-4 bg-white shadow-md rounded-lg text-red-800 font-bold'>Please enter a valid input</p>"
 
-    # Tokenization and padding
-    input_text = tokenizer.texts_to_sequences([input_text])
-    input_text = pad_sequences(input_text, maxlen=250)
+    try:
+        user_input = request.form['user_input']
+        user_input = clean_text(user_input)
+        user_sequences = tokenizer.texts_to_sequences([user_input])
+        user_padded = tf.keras.preprocessing.sequence.pad_sequences(
+            user_sequences, maxlen=max_sequence_length)
+        user_predictions = model.predict(user_padded)
+        output = "Positive" if user_predictions[0] > 0.5 else "Negative"
+        print(f'Predicted Class: {output}')
+        print(user_predictions)
+        return "<p id='prediction' class='flex items-center justify-center w-96 p-4 mt-4 bg-white shadow-md rounded-lg text-gray-800 font-bold'>" + output + "</p>"
 
-    prediction = model.predict(input_text)
-    print(prediction)
-    if prediction > 0.5:
-        return 'Positive Review'
-    else:
-        return 'Negative Review'
+    except Exception as e:
+        print(f"Error predicting input: {e}")
+        return "<p id='prediction' class='flex items-center justify-center w-96 p-4 mt-4 bg-white shadow-md rounded-lg text-red-800 font-bold'>Error analyzing the input</p>"
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=8080)
